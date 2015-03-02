@@ -15,8 +15,9 @@ import (
 //FUTURE: it would be awesome to rewrite this as a "Reader", so the data is treated just as a byte stream
 
 var debug = flag.Bool("d", false, "Show debug info")
-var follow = flag.Bool("f", false, "Enable tail -f style follow behavior")
-var byte_count = flag.Int("c", 1024, "Byte count to retrieve initially")
+var follow = flag.Bool("f", false, "Enable tail -f style follow behaviour")
+var byte_count = flag.Int("c", 1024, "Byte count to retrieve initially, 0 (zero) gives all bytes")
+var line = flag.Bool("l", false, "Delimit each request with a line")
 
 func main() {
 	// Get flags
@@ -29,7 +30,7 @@ func main() {
 		//url = "http://tedb.us/foo.txt"
 		log.Fatal("URL must be specified, e.g. httptail http://example.com/foo.txt")
 	}
-	if strings.Index(url, "http://") != 0 {
+	if strings.Index(url, "http://") != 0 && strings.Index(url, "https://") != 0 {
 		url = "http://" + url
 	}
 	if *debug {
@@ -37,8 +38,13 @@ func main() {
 	}
 
 	client := &http.Client{}
+	
+	var next_request_range = ""
+	if *byte_count != 0 {
+		next_request_range = fmt.Sprintf("-%d", *byte_count)
+	}
 
-	next_request_range := range_request(client, url, fmt.Sprintf("-%d", *byte_count))
+	next_request_range = range_request(client, url, next_request_range)
 
 	if *follow {
 		for {
@@ -60,7 +66,9 @@ func err_fatal(err error) {
 func range_request(client *http.Client, url string, range_header string) string {
 	req, err := http.NewRequest("GET", url, nil)
 	err_fatal(err)
-	req.Header.Set("Range", "bytes=" + range_header)
+	if len(range_header) > 0 {
+		req.Header.Set("Range", "bytes=" + range_header)
+	}
 	req.Header.Set("User-Agent", "HTTPtail")
 
 	if *debug {
@@ -78,11 +86,27 @@ func range_request(client *http.Client, url string, range_header string) string 
 	}
 
 	if resp.StatusCode == http.StatusPartialContent {
-		_, err = io.Copy(os.Stdout, resp.Body)
+		resp_bytes, _ := httputil.DumpResponse(resp, true)
+		if strings.Contains(string(resp_bytes[:]), "Heartbeat") {
+			log.Printf("Heartbeat\n")
+		} else {
+			_, err = io.Copy(os.Stdout, resp.Body)
+		}
+		if *line {
+			fmt.Printf("------------------------------------------------------------------------\n")
+		}
 		err_fatal(err)
 
 		last_byte_position, _ := parse_content_range(resp.Header.Get("Content-Range"))
 		return fmt.Sprintf("%d-", last_byte_position+1)
+	} else if resp.StatusCode == http.StatusOK {
+		_, err = io.Copy(os.Stdout, resp.Body)
+		if *line {
+			fmt.Printf("------------------------------------------------------------------------\n")
+		}
+		err_fatal(err)
+
+		return ""
 	} else if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable && *byte_count == 0 {
 		// with byte_count == 0, we'll keep requesting range "0-" repeatedly, which will never succeed
 		// Make the next request with the file size as our offset
